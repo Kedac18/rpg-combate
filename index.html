@@ -172,11 +172,12 @@ const BASE_CONFIG={
   enemy:{maxHp:260,speed:100,damage:9,attackRange:96,contactRange:72,
     windup:.55,strike:.14,recover:.55,cooldownMin:.4,cooldownMax:.9,
     windupDrift:170,strikeLunge:260,armorKb:.25,guardBreak:.42,
-    poise:5,poiseRegen:1.5,armorPoiseMult:.5,
+    poise:5,poiseRegen:1.5,armorPoiseMult:.5,gbImmunity:1.4,
     respawnDelay:1.3,respawnDistance:300},
   combo:{window:2.4},
   /* TASK-0010 — modo ondas: escala por onda, sem codigo espalhado */
-  waves:{perWaveBase:2,perWaveGrow:1,hpGrow:.12,speedGrow:.04,dmgEvery:3,announce:1.4,respawnDelay:.7},
+  waves:{perWaveBase:2,perWaveGrow:1,hpGrow:.12,speedGrow:.04,dmgEvery:3,announce:1.4,respawnDelay:.7,
+    maxAlive:6,spawnInterval:.85,playerHpGrow:.08,playerDmgGrow:.06,healOnWave:.35},
   attacks:{
     L1:{windup:.07,active:.06,rec:.13,dmg:7,kb:130,hs:.05,range:86,arc:1.8,shake:3,lunge:280,heavy:false,next:'L2'},
     L2:{windup:.08,active:.06,rec:.15,dmg:9,kb:160,hs:.06,range:92,arc:1.9,shake:4,lunge:300,heavy:false,next:'L3'},
@@ -230,19 +231,57 @@ function deepFreeze(o){
 window.CONFIG=deepFreeze(JSON.parse(JSON.stringify(CONFIG)));
 const SPEED=CONFIG.player.speed;
 const P={x:-160,y:0,r:16,hp:CONFIG.player.maxHp,max:CONFIG.player.maxHp,facing:1,state:'idle',atk:null,dashT:0,dx:0,dy:0,
-  inv:0,cd:0,combo:0,comboT:0,vx:0,vy:0,anim:0,dead:false,deadT:0,hitFlash:0};
-const E={x:180,y:0,r:22,hp:CONFIG.enemy.maxHp,max:CONFIG.enemy.maxHp,state:'chase',t:0,cd:.8,ang:0,stagger:0,vx:0,vy:0,
-  dead:false,deadT:0,kills:0,flash:0,anim:0,poise:CONFIG.enemy.poise,hitDone:false};
+  inv:0,cd:0,combo:0,comboT:0,vx:0,vy:0,anim:0,dead:false,deadT:0,hitFlash:0,dmgMul:1};
 const ATK=CONFIG.attacks;
+/* TASK-0011 - varios inimigos ao mesmo tempo.
+   'enemies' e a lista real. 'E' e o ALVO ATUAL (inimigo vivo mais proximo),
+   mantido para camera, HUD e mira nao terem que varrer a lista. */
+const enemies=[];
+function mkEnemy(x,y,hp){
+  return {x,y,r:22,hp:hp,max:hp,state:'chase',t:0,cd:rand(.5,1.1),ang:0,stagger:0,
+    vx:0,vy:0,dead:false,deadT:0,flash:0,anim:0,poise:CONFIG.enemy.poise,
+    hitDone:false,gbImmune:0};
+}
+function nearestEnemy(){
+  let best=null,bd=Infinity;
+  for(const en of enemies){
+    if(en.dead)continue;
+    const d=Math.hypot(en.x-P.x,en.y-P.y);
+    if(d<bd){bd=d;best=en}
+  }
+  return best;
+}
+let E=null;
+function refreshTarget(){E=nearestEnemy()}
 /* TASK-0010 — estado do modo ondas */
 let wave=MODE==='waves'?1:0,waveKills=0,waveTotal=0,gameOver=false,waveToastT=0;
+let waveSpawnLeft=0,spawnCd=0;
 let E_SPEED=CONFIG.enemy.speed,E_DMG=CONFIG.enemy.damage;
 function waveTarget(w){return CONFIG.waves.perWaveBase+CONFIG.waves.perWaveGrow*(w-1)}
-function applyWaveStats(w){
-  E.max=Math.round(CONFIG.enemy.maxHp*(1+CONFIG.waves.hpGrow*(w-1)));
-  E.hp=E.max;
-  E_SPEED=CONFIG.enemy.speed*(1+CONFIG.waves.speedGrow*(w-1));
-  E_DMG=CONFIG.enemy.damage+Math.floor((w-1)/CONFIG.waves.dmgEvery);
+function enemyHpForWave(w){return Math.round(CONFIG.enemy.maxHp*(1+CONFIG.waves.hpGrow*(w-1)))}
+function enemySpeedForWave(w){return CONFIG.enemy.speed*(1+CONFIG.waves.speedGrow*(w-1))}
+function enemyDmgForWave(w){return CONFIG.enemy.damage+Math.floor((w-1)/CONFIG.waves.dmgEvery)}
+function spawnAt(x,y,hp,spd,dmg){
+  const en=mkEnemy(x,y,hp);
+  en.spd=spd;en.dmg=dmg;
+  enemies.push(en);
+  for(let i=0;i<14;i++){
+    const b=rand(0,TAU),sp=rand(40,150);
+    parts.push({x,y,vx:Math.cos(b)*sp,vy:Math.sin(b)*sp,life:rand(.4,.8),max:.8,
+      size:rand(2,4),col:'255,90,110',line:false});
+  }
+  return en;
+}
+function spawnWaveEnemy(){
+  const a=rand(0,TAU),d=CONFIG.enemy.respawnDistance;
+  return spawnAt(clamp(P.x+Math.cos(a)*d,-400,400),clamp(P.y+Math.sin(a)*d,-400,400),
+    enemyHpForWave(wave),enemySpeedForWave(wave),enemyDmgForWave(wave));
+}
+function spawnLobbyEnemy(random){
+  if(!random)return spawnAt(180,0,CONFIG.enemy.maxHp,CONFIG.enemy.speed,CONFIG.enemy.damage);
+  const a=rand(0,TAU),d=CONFIG.enemy.respawnDistance;
+  return spawnAt(clamp(P.x+Math.cos(a)*d,-400,400),clamp(P.y+Math.sin(a)*d,-400,400),
+    CONFIG.enemy.maxHp,CONFIG.enemy.speed,CONFIG.enemy.damage);
 }
 function showWave(txt,hold){
   const el=$('wave');if(!el)return;
@@ -311,15 +350,16 @@ if(typeof document!=='undefined'&&document.addEventListener){
 }
 /* ---------- ações ---------- */
 function faceEnemy(){
+  if(!E)return;
   const dx=E.x-P.x,dy=E.y-P.y;
   if(Math.hypot(dx,dy)<520)P.facing=dx<0?-1:1;
 }
 function startAttack(key){
   const def=ATK[key];
   faceEnemy();
-  const ang=Math.atan2(E.y-P.y,E.x-P.x);
+  const ang=E?Math.atan2(E.y-P.y,E.x-P.x):(P.facing>0?0:Math.PI);
   P.state='attack';
-  P.atk={key,def,t:0,hasHit:false,queued:false,dir:ang,trailPts:[]};
+  P.atk={key,def,t:0,hasHit:false,queued:false,dir:ang,trailPts:[],hitSet:new Set()};
   P.vx+=Math.cos(ang)*def.lunge*.35;P.vy+=Math.sin(ang)*def.lunge*.35;
   sfxSwing(def.heavy);
 }
@@ -371,65 +411,65 @@ function hitSpark(x,y,ang,heavy){
 }
 function tryHit(){
   const a=P.atk,def=a.def;
-  if(E.dead)return;
-  const dx=E.x-P.x,dy=E.y-P.y,dist=Math.hypot(dx,dy);
-  if(dist>def.range+E.r)return;
-  if(Math.abs(angDiff(Math.atan2(dy,dx),a.dir))>def.arc/2)return;
-  a.hasHit=true;
-  const ang=Math.atan2(dy,dx);
-  const dir={x:Math.cos(ang),y:Math.sin(ang)};
-  E.hp=Math.max(0,E.hp-def.dmg);
-  /* TASK-0009 — o problema central: o inimigo nunca contra-atacava.
-     Motivo: QUALQUER golpe leve dava stagger (.2s) e o stagger congelava a
-     máquina de estados inteira, inclusive a perseguição. Com combo a cada .26s,
-     ele ficava travado para sempre — o "manequim".
-     Agora existe postura (poise): golpes leves desgastam, e só ao zerar ele
-     perde o equilíbrio. Enquanto ele está preparando/golpeando, o desgaste é
-     reduzido (armadura), menos no golpe pesado, que sempre quebra a guarda. */
-  const attacking=(E.state==='windup'||E.state==='strike');
-  E.poise-=(def.heavy?3:1)*(attacking?CONFIG.enemy.armorPoiseMult:1);
-  if(def.heavy&&attacking){
-    E.state='recover';E.t=0;E.poise=CONFIG.enemy.poise;
-    E.stagger=Math.max(E.stagger,CONFIG.enemy.guardBreak);
-    E.vx+=dir.x*def.kb;E.vy+=dir.y*def.kb;
-    addFloat(E.x,E.y-E.r-34,'QUEBRA','#ffd166',18);
-  } else if(E.poise<=0){
-    E.poise=CONFIG.enemy.poise;
-    E.stagger=Math.max(E.stagger,.18);
-    if(attacking){E.state='recover';E.t=0}
-    E.vx+=dir.x*def.kb;E.vy+=dir.y*def.kb;
-  } else if(attacking){
-    E.vx+=dir.x*def.kb*CONFIG.enemy.armorKb;
-    E.vy+=dir.y*def.kb*CONFIG.enemy.armorKb;
-  } else {
-    E.vx+=dir.x*def.kb*.7;E.vy+=dir.y*def.kb*.7;
+  if(a.hasHit)return;
+  let any=false;
+  for(const en of enemies){
+    if(en.dead||a.hitSet.has(en))continue;
+    const dx=en.x-P.x,dy=en.y-P.y,dist=Math.hypot(dx,dy);
+    if(dist>def.range+en.r)continue;
+    if(Math.abs(angDiff(Math.atan2(dy,dx),a.dir))>def.arc/2)continue;
+    a.hitSet.add(en);
+    any=true;
+    const ang=Math.atan2(dy,dx);
+    const dir={x:Math.cos(ang),y:Math.sin(ang)};
+    const dmg=Math.round(def.dmg*P.dmgMul);
+    en.hp=Math.max(0,en.hp-dmg);
+    en.flash=1;
+    /* TASK-0009 postura/armadura; TASK-0011 janela de imunidade a quebra de guarda,
+       senao dava para spammar pesado e travar o inimigo para sempre. */
+    const attacking=(en.state==='windup'||en.state==='strike');
+    en.poise-=(def.heavy?3:1)*(attacking?CONFIG.enemy.armorPoiseMult:1);
+    if(def.heavy&&attacking&&en.gbImmune<=0){
+      en.state='recover';en.t=0;en.poise=CONFIG.enemy.poise;
+      en.stagger=Math.max(en.stagger,CONFIG.enemy.guardBreak);
+      en.gbImmune=CONFIG.enemy.gbImmunity;
+      en.vx+=dir.x*def.kb;en.vy+=dir.y*def.kb;
+      addFloat(en.x,en.y-en.r-34,'QUEBRA','#ffd166',18);
+    } else if(en.poise<=0){
+      en.poise=CONFIG.enemy.poise;
+      en.stagger=Math.max(en.stagger,.18);
+      if(attacking){en.state='recover';en.t=0}
+      en.vx+=dir.x*def.kb;en.vy+=dir.y*def.kb;
+    } else if(attacking){
+      en.vx+=dir.x*def.kb*CONFIG.enemy.armorKb;
+      en.vy+=dir.y*def.kb*CONFIG.enemy.armorKb;
+    } else {
+      en.vx+=dir.x*def.kb*.7;en.vy+=dir.y*def.kb*.7;
+    }
+    hitSpark(en.x-dir.x*en.r*.6,en.y-dir.y*en.r*.6,ang,def.heavy);
+    addFloat(en.x+rand(-8,8),en.y-en.r-14,'-'+dmg,def.heavy?'#ffd166':'#bde6ff',def.heavy?22:16);
+    if(en.hp<=0)killEnemy(en);
   }
-  E.flash=1;
-  P.combo++;P.comboT=CONFIG.combo.window;updateCombo();
-  hitstop=Math.max(hitstop,def.hs);
-  shake=Math.max(shake,def.shake);
-  hitSpark(E.x-dir.x*E.r*.6,E.y-dir.y*E.r*.6,ang,def.heavy);
-  addFloat(E.x+rand(-8,8),E.y-E.r-14,'-'+def.dmg,def.heavy?'#ffd166':'#bde6ff',def.heavy?22:16);
-  sfxHit(def.heavy);
-  if(E.hp<=0)killEnemy();
+  if(any){
+    a.hasHit=true;
+    P.combo++;P.comboT=CONFIG.combo.window;updateCombo();
+    hitstop=Math.max(hitstop,def.hs);
+    shake=Math.max(shake,def.shake);
+    sfxHit(def.heavy);
+  }
 }
-function killEnemy(){
-  E.dead=true;E.deadT=0;E.kills=(E.kills||0)+1;
+function killEnemy(en){
+  en.dead=true;en.deadT=0;
   hitstop=Math.max(hitstop,.14);shake=Math.max(shake,14);
   for(let i=0;i<34;i++){
     const a=rand(0,TAU),sp=rand(60,420);
-    parts.push({x:E.x,y:E.y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:rand(.3,.9),max:.9,
+    parts.push({x:en.x,y:en.y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:rand(.3,.9),max:.9,
       size:rand(2,5),col:i%2?'255,90,110':'255,210,150',line:i%2===0});
   }
-  addFloat(E.x,E.y-40,'ABATIDO','#ffd166',20);
-  /* TASK-0010 — progressão de ondas só no modo waves (lobby intocado) */
+  addFloat(en.x,en.y-40,'ABATIDO','#ffd166',20);
   if(MODE==='waves'){
     waveKills++;
-    if(waveKills>=waveTarget(wave)){
-      wave++;waveKills=0;
-      if($('ename'))$('ename').textContent='INIMIGO · ONDA '+wave;
-      showWave('ONDA '+wave,CONFIG.waves.announce);
-    }
+    if(waveSpawnLeft<=0&&aliveCount()===0)nextWave();
   }
 }
 function hurtPlayer(dmg,ang){
@@ -455,15 +495,15 @@ function updateCombo(){
   $('combon').textContent=P.combo;
   el.style.opacity=(P.combo>=2&&P.comboT>0)?1:0;
 }
-function enemyStrike(){
-  const dx=P.x-E.x,dy=P.y-E.y,dist=Math.hypot(dx,dy);
+function enemyStrike(en){
+  const dx=P.x-en.x,dy=P.y-en.y,dist=Math.hypot(dx,dy);
   const ang=Math.atan2(dy,dx);
-  if(dist<CONFIG.enemy.attackRange+P.r&&Math.abs(angDiff(ang,E.ang))<1.15&&P.inv<=0){
-    hurtPlayer(E_DMG,ang);
+  if(dist<CONFIG.enemy.attackRange+P.r&&Math.abs(angDiff(ang,en.ang))<1.15&&P.inv<=0){
+    hurtPlayer(en.dmg,ang);
   }
   for(let i=0;i<8;i++){
     const a=ang+rand(-.7,.7),sp=rand(80,240);
-    parts.push({x:E.x+Math.cos(ang)*30,y:E.y+Math.sin(ang)*30,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,
+    parts.push({x:en.x+Math.cos(ang)*30,y:en.y+Math.sin(ang)*30,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,
       life:rand(.15,.35),max:.35,size:rand(1.5,3),col:'255,120,130',line:true});
   }
 }
@@ -514,77 +554,83 @@ function updatePlayer(dt){
   if(d>430){P.x*=430/d;P.y*=430/d}
 }
 
-function updateEnemy(dt){
-  E.flash=Math.max(0,E.flash-dt*4);
-  if(E.dead){
-    E.deadT+=dt;
-    if(E.deadT>CONFIG.enemy.respawnDelay)respawnEnemy();
-    return;
-  }
-  E.stagger=Math.max(0,E.stagger-dt);E.cd=Math.max(0,E.cd-dt);
-  E.poise=Math.min(CONFIG.enemy.poise,E.poise+CONFIG.enemy.poiseRegen*dt);
-  const dx=P.x-E.x,dy=P.y-E.y,dist=Math.hypot(dx,dy)||1;
+function aliveCount(){let n=0;for(const en of enemies)if(!en.dead)n++;return n}
+function updateOneEnemy(dt,en){
+  en.flash=Math.max(0,en.flash-dt*4);
+  en.gbImmune=Math.max(0,en.gbImmune-dt);
+  if(en.dead){en.deadT+=dt;return}
+  en.stagger=Math.max(0,en.stagger-dt);en.cd=Math.max(0,en.cd-dt);
+  en.poise=Math.min(CONFIG.enemy.poise,en.poise+CONFIG.enemy.poiseRegen*dt);
+  const dx=P.x-en.x,dy=P.y-en.y,dist=Math.hypot(dx,dy)||1;
   const ang=Math.atan2(dy,dx);
-  if(E.stagger<=0){
-    if(E.state==='chase'){
-      if(dist>CONFIG.enemy.contactRange){E.x+=dx/dist*E_SPEED*dt;E.y+=dy/dist*E_SPEED*dt;E.anim+=dt}
-      else if(E.cd<=0){E.state='windup';E.t=0;E.ang=ang}
-    } else if(E.state==='windup'){
-      E.t+=dt;E.ang=lerp(E.ang,ang,.06);
-      /* TASK-0009: avança durante a preparação (era imóvel). Dá alcance real ao golpe
-         sem virar teleporte: 170 px/s durante .55s ≈ 93 px. */
+  if(en.stagger<=0){
+    if(en.state==='chase'){
+      if(dist>CONFIG.enemy.contactRange){en.x+=dx/dist*en.spd*dt;en.y+=dy/dist*en.spd*dt;en.anim+=dt}
+      else if(en.cd<=0){en.state='windup';en.t=0;en.ang=ang}
+    } else if(en.state==='windup'){
+      en.t+=dt;en.ang=lerp(en.ang,ang,.06);
       if(dist>CONFIG.enemy.attackRange*.55){
-        E.x+=dx/dist*CONFIG.enemy.windupDrift*dt;
-        E.y+=dy/dist*CONFIG.enemy.windupDrift*dt;
-        E.anim+=dt;
+        en.x+=dx/dist*CONFIG.enemy.windupDrift*dt;
+        en.y+=dy/dist*CONFIG.enemy.windupDrift*dt;
+        en.anim+=dt;
       }
-      if(E.t>=CONFIG.enemy.windup){E.state='strike';E.t=0;E.hitDone=false;enemyStrike()}
-    } else if(E.state==='strike'){
-      E.t+=dt;
-      /* TASK-0009: impulso à frente no golpe, desacelerado pelo mesmo damping do knockback. */
-      if(!E.hitDone){
-        E.vx+=Math.cos(E.ang)*CONFIG.enemy.strikeLunge;
-        E.vy+=Math.sin(E.ang)*CONFIG.enemy.strikeLunge;
+      if(en.t>=CONFIG.enemy.windup){en.state='strike';en.t=0;en.hitDone=false;enemyStrike(en)}
+    } else if(en.state==='strike'){
+      en.t+=dt;
+      if(!en.hitDone){
+        en.hitDone=true;
+        en.vx+=Math.cos(en.ang)*CONFIG.enemy.strikeLunge;
+        en.vy+=Math.sin(en.ang)*CONFIG.enemy.strikeLunge;
       }
-      if(E.t>=CONFIG.enemy.strike){E.state='recover';E.t=0}
-    } else if(E.state==='recover'){
-      E.t+=dt;
-      if(E.t>=CONFIG.enemy.recover){E.state='chase';E.cd=rand(CONFIG.enemy.cooldownMin,CONFIG.enemy.cooldownMax)}
+      if(en.t>=CONFIG.enemy.strike){en.state='recover';en.t=0}
+    } else if(en.state==='recover'){
+      en.t+=dt;
+      if(en.t>=CONFIG.enemy.recover){en.state='chase';en.cd=rand(CONFIG.enemy.cooldownMin,CONFIG.enemy.cooldownMax)}
     }
   }
-  E.x+=E.vx*dt;E.y+=E.vy*dt;
-  const dmp=Math.exp(-8*dt);E.vx*=dmp;E.vy*=dmp;
-  /* TASK-0009: o inimigo não atravessa o jogador. Antes, o impulso do golpe podia
-     passar "por dentro" e terminar atrás dele — o jogador era empurrado para trás
-     e o combate perdia a leitura. Aqui ele para no anel de contato. */
-  {
-    const bx=P.x-E.x,by=P.y-E.y,bd=Math.hypot(bx,by),minB=P.r+E.r;
-    if(bd<minB&&bd>.001&&!P.dead){
-      const nx=bx/bd,ny=by/bd;
-      E.x=P.x-nx*minB;E.y=P.y-ny*minB;
-      E.vx*=.25;E.vy*=.25;
-    }
+  en.x+=en.vx*dt;en.y+=en.vy*dt;
+  const dmp=Math.exp(-8*dt);en.vx*=dmp;en.vy*=dmp;
+  const bx=P.x-en.x,by=P.y-en.y,bd=Math.hypot(bx,by),minB=P.r+en.r;
+  if(bd<minB&&bd>.001&&!P.dead){
+    const nx=bx/bd,ny=by/bd;
+    en.x=P.x-nx*minB;en.y=P.y-ny*minB;
+    en.vx*=.25;en.vy*=.25;
   }
-  const dd=Math.hypot(P.x-E.x,P.y-E.y),minD=P.r+E.r;
-  if(dd<minD&&dd>.001&&!P.dead){
-    const nx=(P.x-E.x)/dd,ny=(P.y-E.y)/dd,push=(minD-dd)/2;
-    P.x+=nx*push;P.y+=ny*push;E.x-=nx*push;E.y-=ny*push;
-  }
-  const d=Math.hypot(E.x,E.y);
-  if(d>430){E.x*=430/d;E.y*=430/d}
+  const d=Math.hypot(en.x,en.y);
+  if(d>430){en.x*=430/d;en.y*=430/d}
 }
-function respawnEnemy(){
-  const a=rand(0,TAU);
-  if(MODE==='waves')applyWaveStats(wave);
-  E.dead=false;E.hp=E.max;E.state='chase';E.t=0;E.cd=.9;E.stagger=0;E.vx=E.vy=0;E.deadT=0;E.poise=CONFIG.enemy.poise;
-  E.x=clamp(P.x+Math.cos(a)*CONFIG.enemy.respawnDistance,-400,400);
-  E.y=clamp(P.y+Math.sin(a)*CONFIG.enemy.respawnDistance,-400,400);
-  for(let i=0;i<16;i++){
-    const b=rand(0,TAU),sp=rand(40,150);
-    parts.push({x:E.x,y:E.y,vx:Math.cos(b)*sp,vy:Math.sin(b)*sp,life:rand(.4,.8),max:.8,
-      size:rand(2,4),col:'255,90,110',line:false});
+function updateEnemy(dt){
+  for(const en of enemies)updateOneEnemy(dt,en);
+  // limpa corpos antigos
+  for(let i=enemies.length-1;i>=0;i--){
+    const en=enemies[i];
+    if(en.dead&&(MODE==='waves'?en.deadT>1.6:en.deadT>CONFIG.enemy.respawnDelay))enemies.splice(i,1);
+  }
+  if(MODE==='waves'){
+    if(!gameOver)spawnTick(dt);
+  } else if(enemies.length===0){
+    spawnLobbyEnemy(true);
+  }
+  refreshTarget();
+}
+function spawnTick(dt){
+  if(waveSpawnLeft<=0)return;
+  spawnCd-=dt;
+  if(spawnCd<=0&&aliveCount()<CONFIG.waves.maxAlive){
+    spawnWaveEnemy();
+    waveSpawnLeft--;
+    spawnCd=CONFIG.waves.spawnInterval;
   }
 }
+function nextWave(){
+  wave++;waveKills=0;waveSpawnLeft=waveTarget(wave);spawnCd=0;
+  P.max=Math.round(P.max*(1+CONFIG.waves.playerHpGrow));
+  P.hp=Math.min(P.max,P.hp+P.max*CONFIG.waves.healOnWave);
+  P.dmgMul*=1+CONFIG.waves.playerDmgGrow;
+  if($('ename'))$('ename').textContent='INIMIGO · ONDA '+wave;
+  showWave('ONDA '+wave,CONFIG.waves.announce);
+}
+function respawnEnemy(){spawnLobbyEnemy()}
 function updateParticles(dt){
   for(let i=parts.length-1;i>=0;i--){
     const p=parts[i];p.life-=dt;
@@ -694,61 +740,58 @@ function drawPlayer(){
   }
 }
 
-function drawEnemy(){
-  const x=E.x,y=E.y;
+function drawEnemy(en){
+  const x=en.x,y=en.y;
   ctx.save();ctx.translate(x,y);
   ctx.fillStyle='rgba(0,0,0,.55)';ctx.beginPath();ctx.ellipse(0,34,30,10,0,0,TAU);ctx.fill();
-  if(E.dead){
-    ctx.globalAlpha=Math.max(0,1-E.deadT/1.3)*.5;
+  if(en.dead){
+    ctx.globalAlpha=Math.max(0,1-en.deadT/1.3)*.5;
     ctx.rotate(.8);ctx.fillStyle='#4a1b24';
     ctx.beginPath();ctx.roundRect(-28,4,50,20,8);ctx.fill();ctx.restore();return;
   }
-  if(E.stagger>0)ctx.rotate(Math.sin(time*40)*.05);
+  if(en.stagger>0)ctx.rotate(Math.sin(time*40)*.05);
   const bob=Math.sin(time*3.4)*2;
-  // corpo
   const g=ctx.createLinearGradient(0,-26,0,26);
-  if(E.flash>0){g.addColorStop(0,'#ffffff');g.addColorStop(1,'#ffb3bd')}
+  if(en.flash>0){g.addColorStop(0,'#ffffff');g.addColorStop(1,'#ffb3bd')}
   else{g.addColorStop(0,'#5a2130');g.addColorStop(1,'#33121b')}
   ctx.fillStyle=g;
   ctx.beginPath();ctx.roundRect(-20,-24+bob,40,50,12);ctx.fill();
-  ctx.strokeStyle=E.state==='windup'?'rgba(255,80,100,.95)':'rgba(255,90,110,.5)';
-  ctx.lineWidth=E.state==='windup'?3:1.6;ctx.stroke();
-  // ombros
+  ctx.strokeStyle=en.state==='windup'?'rgba(255,80,100,.95)':'rgba(255,90,110,.5)';
+  ctx.lineWidth=en.state==='windup'?3:1.6;ctx.stroke();
   ctx.fillStyle='#431a25';
   ctx.beginPath();ctx.arc(-20,-12+bob,9,0,TAU);ctx.arc(20,-12+bob,9,0,TAU);ctx.fill();
-  // cabeça
-  ctx.fillStyle=E.flash>0?'#fff':'#2a0f16';
+  ctx.fillStyle=en.flash>0?'#fff':'#2a0f16';
   ctx.beginPath();ctx.arc(0,-34+bob,13,0,TAU);ctx.fill();
-  // olho
   const eg=ctx.createRadialGradient(3,-36+bob,1,3,-36+bob,12);
   eg.addColorStop(0,'#fff2a8');eg.addColorStop(.35,'#ff5a6e');eg.addColorStop(1,'rgba(255,50,70,0)');
   ctx.fillStyle=eg;ctx.beginPath();ctx.arc(3,-36+bob,12,0,TAU);ctx.fill();
   ctx.fillStyle='#ffd7dc';ctx.beginPath();ctx.arc(4,-36+bob,3.2,0,TAU);ctx.fill();
-  // núcleo no peito
   ctx.fillStyle='rgba(255,80,100,.6)';
   ctx.beginPath();ctx.arc(0,2+bob,6+Math.sin(time*6)*1.6,0,TAU);ctx.fill();
   ctx.restore();
-  // telegraph — TASK-0009: agora desenha o ALCANCE REAL do golpe
-  // (attackRange + P.r = 112 px) e o ÂNGULO REAL do teste de acerto (±1.15 rad).
-  // Antes mostrava 76 px e ±.62 rad: mentira de 36 px que fazia o jogador
-  // levar dano aparentemente fora da área vermelha.
-  if(E.state==='windup'){
-    const p=clamp(E.t/CONFIG.enemy.windup,0,1);
+  // barra de vida individual (TASK-0011)
+  if(en.hp<en.max&&en.hp>0){
+    const w=40,hh=3.5,frac=Math.max(0,en.hp/en.max);
+    ctx.fillStyle='rgba(0,0,0,.6)';ctx.fillRect(x-w/2,y-56,w,hh);
+    ctx.fillStyle='#ff5a6e';ctx.fillRect(x-w/2,y-56,w*frac,hh);
+  }
+  // telegraph — TASK-0009: alcance e angulo reais
+  if(en.state==='windup'){
+    const p=clamp(en.t/CONFIG.enemy.windup,0,1);
     const reach=CONFIG.enemy.attackRange+P.r;
-    ctx.save();ctx.translate(x,y);ctx.rotate(E.ang);
-    // área preenchida: é exatamente onde o golpe acerta
-    ctx.fillStyle='rgba(255,60,80,'+(.04+.11*p)+')';
+    const strong=(E===en);
+    ctx.save();ctx.translate(x,y);ctx.rotate(en.ang);
+    ctx.fillStyle='rgba(255,60,80,'+((strong?.05:.025)+(strong?.12:.06)*p)+')';
     ctx.beginPath();ctx.moveTo(0,0);ctx.arc(0,0,reach,-1.15,1.15);ctx.closePath();ctx.fill();
-    ctx.strokeStyle='rgba(255,70,90,'+(.35+.55*p)+')';ctx.lineWidth=2+4*p;ctx.lineCap='round';
+    ctx.strokeStyle='rgba(255,70,90,'+((strong?.35:.15)+(.55*p))+')';ctx.lineWidth=2+4*p;ctx.lineCap='round';
     ctx.beginPath();ctx.arc(0,0,reach,-1.15,1.15);ctx.stroke();
-    // anel interno: progresso da preparação (usa o windup do preset, não .55 fixo)
     ctx.strokeStyle='rgba(255,70,90,'+(.25+.35*p)+')';ctx.lineWidth=2;
     ctx.beginPath();ctx.arc(0,0,26+18*p,0,TAU);ctx.stroke();
     ctx.restore();
   }
-  if(E.state==='strike'){
+  if(en.state==='strike'){
     const reach=CONFIG.enemy.attackRange+P.r;
-    ctx.save();ctx.translate(x,y);ctx.rotate(E.ang);
+    ctx.save();ctx.translate(x,y);ctx.rotate(en.ang);
     ctx.fillStyle='rgba(255,120,130,.16)';
     ctx.beginPath();ctx.moveTo(0,0);ctx.arc(0,0,reach,-1.15,1.15);ctx.closePath();ctx.fill();
     ctx.strokeStyle='rgba(255,150,160,.95)';ctx.lineWidth=5;ctx.lineCap='round';
@@ -789,14 +832,14 @@ function drawFloats(){
 }
 function syncHud(){
   $('pfill').style.width=(P.hp/P.max*100)+'%';
-  $('efill').style.width=(E.dead?0:E.hp/E.max*100)+'%';
+  $('efill').style.width=(E&&!E.dead?E.hp/E.max*100:0)+'%';
   $('php').textContent=Math.ceil(P.hp);
   if(MODE==='waves'){
     const el=$('wave');
     if(el){
       if(gameOver)el.classList.remove('on');
       else{
-        if(waveToastT<=0)el.textContent='ONDA '+wave+' · '+waveKills+'/'+waveTarget(wave);
+        if(waveToastT<=0)el.textContent='ONDA '+wave+' · '+waveKills+'/'+waveTarget(wave)+' · '+aliveCount()+' VIVOS';
         el.classList.add('on');
       }
     }
@@ -808,8 +851,10 @@ function updateCamera(dt,z){
   const halfW=W/(2*z),halfH=H/(2*z);
   const mx=Math.max(0,460-halfW),my=Math.max(0,460-halfH);
   let tx=P.x,ty=P.y;
-  const d=Math.hypot(E.x-P.x,E.y-P.y);
-  if(!E.dead&&d<900){tx=P.x*.5+E.x*.5;ty=P.y*.5+E.y*.5}
+  if(E){
+    const d=Math.hypot(E.x-P.x,E.y-P.y);
+    if(d<900){tx=P.x*.62+E.x*.38;ty=P.y*.62+E.y*.38}
+  }
   const k=Math.min(1,dt*7);
   camX=lerp(camX,clamp(tx,-mx,mx),k);
   camY=lerp(camY,clamp(ty,-my,my),k);
@@ -831,7 +876,10 @@ function render(dt){
   drawArena();
   drawTrail();
   drawParticles();
-  if(E.y<P.y)drawEnemy(),drawPlayer();else{drawPlayer();drawEnemy()}
+  // TASK-0011: desenha TODOS os inimigos, ordenados por Y junto com o jogador
+  const drawList=[{y:P.y,kind:'p'}].concat(enemies.map(en=>({y:en.y,kind:'e',en})));
+  drawList.sort((a,b)=>a.y-b.y);
+  for(const it of drawList){ if(it.kind==='p')drawPlayer(); else drawEnemy(it.en); }
   drawFloats();
   ctx.restore();
 
@@ -879,8 +927,13 @@ if(modeBtn){
     location.href=u.toString();
   };
 }
+if(MODE==='lobby'){
+  spawnLobbyEnemy();
+  refreshTarget();
+}
 if(MODE==='waves'){
-  applyWaveStats(1);
+  waveSpawnLeft=waveTarget(1);spawnCd=0;
+  refreshTarget();
   if($('ename'))$('ename').textContent='INIMIGO · ONDA 1';
   showWave('ONDA 1',CONFIG.waves.announce);
   if($('toast'))$('toast').innerHTML='ONDA 1<br><small>sobreviva o quanto puder</small>';
