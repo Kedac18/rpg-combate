@@ -27,6 +27,17 @@
   .flash{position:absolute;inset:0;background:radial-gradient(circle at 50% 55%,rgba(255,70,70,.34),transparent 62%);opacity:0;transition:opacity .25s}
   .preset{position:absolute;right:22px;bottom:20px;pointer-events:auto;font:600 10px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.14em;color:#8fb6e6;background:rgba(14,23,38,.85);border:1px solid #2b3c55;padding:8px 11px;border-radius:6px;cursor:pointer;opacity:.7}
   .preset:hover{opacity:1;color:#cfe4ff;border-color:#3d5580}
+  /* ---- modos de jogo (TASK-0010) ---- */
+  .mode{position:absolute;right:22px;bottom:58px;pointer-events:auto;font:600 10px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.14em;color:#8fb6e6;background:rgba(14,23,38,.85);border:1px solid #2b3c55;padding:8px 11px;border-radius:6px;cursor:pointer;opacity:.7}
+  .mode:hover{opacity:1;color:#cfe4ff;border-color:#3d5580}
+  .wave{position:absolute;left:50%;top:64px;transform:translateX(-50%);font:800 13px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.3em;color:#ffd166;opacity:0;transition:opacity .3s}
+  .wave.on{opacity:1}
+  .over{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:18px;background:rgba(5,7,12,.82);pointer-events:auto;text-align:center}
+  .over.on{display:flex}
+  .over h1{font-size:15px;letter-spacing:.3em;color:#ff7d8e;font-weight:800}
+  .over .big{font-size:52px;font-weight:800;letter-spacing:.04em;color:#fff;line-height:1}
+  .over .sub{font-size:11px;letter-spacing:.22em;color:#8fb6e6}
+  .over button{margin-top:6px;font:700 12px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.18em;color:#04121c;background:linear-gradient(180deg,#7fe3c0,#38c6a0);border:0;padding:13px 22px;border-radius:8px;cursor:pointer}
   .toast{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:12px;letter-spacing:.26em;color:#9fc0e8;transition:opacity .5s;text-align:center;line-height:1.9}
   .toast small{opacity:.6;font-size:10px;letter-spacing:.1em}
 
@@ -50,6 +61,10 @@
     .combo{top:36%;right:14px}
     .combo .n{font-size:40px}
     .toast{font-size:10.5px;letter-spacing:.1em;width:86vw;top:34%}
+    /* TASK-0010 — no celular os botões de modo/preset ficam empilhados no topo direito,
+       longe do joystick e do pad de toque */
+    .mode{top:calc(76px + env(safe-area-inset-top));right:calc(12px + env(safe-area-inset-right));bottom:auto;padding:6px 8px;font-size:9px;max-width:44vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .wave{top:calc(108px + env(safe-area-inset-top));font-size:11px;letter-spacing:.2em}
   }
   @media (hover:hover) and (pointer:fine) and (min-width:901px) and (min-height:561px){ .hint{display:block} }
 </style>
@@ -57,12 +72,14 @@
 <body>
 <canvas id="c"></canvas>
 <div class="hud">
-  <div class="top"><div class="ename">MANEQUIM DE TESTE</div>
+  <div class="top"><div class="ename" id="ename">MANEQUIM DE TESTE</div>
     <div class="ebar"><div class="efill" id="efill"></div></div></div>
+  <div class="wave" id="wave"></div>
   <div class="bl"><div class="pn"><b>VOCÊ</b><span id="php">100</span></div>
     <div class="pbar"><div class="pfill" id="pfill"></div></div></div>
   <div class="combo" id="combo"><div class="n" id="combon">0</div><div class="l">GOLPES</div></div>
   <div class="hint"><kbd>W A S D</kbd> mover &nbsp;·&nbsp; <kbd>J</kbd> combo 3 golpes &nbsp;·&nbsp; <kbd>K</kbd> pesado &nbsp;·&nbsp; <kbd>Shift</kbd> esquiva</div>
+  <button id="modeBtn" class="mode" type="button">MODO: LOBBY</button>
   <button id="presetBtn" class="preset" type="button">PRESET: ORIGINAL</button>
   <div class="touch" id="touch">
     <div class="stick" id="stick"><div class="knob" id="knob"></div></div>
@@ -73,6 +90,12 @@
     </div>
   </div>
   <div class="flash" id="flash"></div>
+  <div class="over" id="over">
+    <h1>FIM DE JOGO</h1>
+    <div class="big" id="overWave">1</div>
+    <div class="sub" id="overSub">ONDAS SOBREVIVIDAS</div>
+    <button id="restart" type="button">JOGAR DE NOVO</button>
+  </div>
   <div class="toast" id="toast">CLIQUE OU APERTE UMA TECLA<br><small>controles na parte de baixo</small></div>
 </div>
 <script>
@@ -152,6 +175,8 @@ const BASE_CONFIG={
     poise:5,poiseRegen:1.5,armorPoiseMult:.5,
     respawnDelay:1.3,respawnDistance:300},
   combo:{window:2.4},
+  /* TASK-0010 — modo ondas: escala por onda, sem codigo espalhado */
+  waves:{perWaveBase:2,perWaveGrow:1,hpGrow:.12,speedGrow:.04,dmgEvery:3,announce:1.4,respawnDelay:.7},
   attacks:{
     L1:{windup:.07,active:.06,rec:.13,dmg:7,kb:130,hs:.05,range:86,arc:1.8,shake:3,lunge:280,heavy:false,next:'L2'},
     L2:{windup:.08,active:.06,rec:.15,dmg:9,kb:160,hs:.06,range:92,arc:1.9,shake:4,lunge:300,heavy:false,next:'L3'},
@@ -188,6 +213,12 @@ function activePresetId(){
   return (p&&PRESETS[p])?p:'original';
 }
 const PRESET_ID=activePresetId();
+/* TASK-0010 — modos. lobby = sala de espera (comportamento original, padrão).
+   waves = modo de jogo com ondas. ?mode=waves */
+const MODE=(()=>{
+  const qs=(typeof location!=='undefined'&&location.search)||'';
+  return new URLSearchParams(qs).get('mode')==='waves'?'waves':'lobby';
+})();
 const ACTIVE_PRESET=PRESETS[PRESET_ID];
 const CONFIG=buildConfig(BASE_CONFIG,ACTIVE_PRESET.overrides);
 /* Vista somente-leitura para inspeção (TASK-0003).
@@ -203,6 +234,21 @@ const P={x:-160,y:0,r:16,hp:CONFIG.player.maxHp,max:CONFIG.player.maxHp,facing:1
 const E={x:180,y:0,r:22,hp:CONFIG.enemy.maxHp,max:CONFIG.enemy.maxHp,state:'chase',t:0,cd:.8,ang:0,stagger:0,vx:0,vy:0,
   dead:false,deadT:0,kills:0,flash:0,anim:0,poise:CONFIG.enemy.poise,hitDone:false};
 const ATK=CONFIG.attacks;
+/* TASK-0010 — estado do modo ondas */
+let wave=MODE==='waves'?1:0,waveKills=0,waveTotal=0,gameOver=false,waveToastT=0;
+let E_SPEED=CONFIG.enemy.speed,E_DMG=CONFIG.enemy.damage;
+function waveTarget(w){return CONFIG.waves.perWaveBase+CONFIG.waves.perWaveGrow*(w-1)}
+function applyWaveStats(w){
+  E.max=Math.round(CONFIG.enemy.maxHp*(1+CONFIG.waves.hpGrow*(w-1)));
+  E.hp=E.max;
+  E_SPEED=CONFIG.enemy.speed*(1+CONFIG.waves.speedGrow*(w-1));
+  E_DMG=CONFIG.enemy.damage+Math.floor((w-1)/CONFIG.waves.dmgEvery);
+}
+function showWave(txt,hold){
+  const el=$('wave');if(!el)return;
+  el.textContent=txt;el.classList.add('on');
+  waveToastT=hold||CONFIG.waves.announce;
+}
 let shake=0,hitstop=0,time=0,started=false,tick=0;
 const parts=[],floats=[],trail=[];
 const keys={};
@@ -376,6 +422,15 @@ function killEnemy(){
       size:rand(2,5),col:i%2?'255,90,110':'255,210,150',line:i%2===0});
   }
   addFloat(E.x,E.y-40,'ABATIDO','#ffd166',20);
+  /* TASK-0010 — progressão de ondas só no modo waves (lobby intocado) */
+  if(MODE==='waves'){
+    waveKills++;
+    if(waveKills>=waveTarget(wave)){
+      wave++;waveKills=0;
+      if($('ename'))$('ename').textContent='INIMIGO · ONDA '+wave;
+      showWave('ONDA '+wave,CONFIG.waves.announce);
+    }
+  }
 }
 function hurtPlayer(dmg,ang){
   if(P.inv>0||P.dead)return;
@@ -387,7 +442,13 @@ function hurtPlayer(dmg,ang){
   addFloat(P.x,P.y-32,'-'+dmg,'#ff7d8e',17);
   const f=$('flash');f.style.opacity=.9;setTimeout(()=>f.style.opacity=0,90);
   sfxHit(false);
-  if(P.hp<=0){P.dead=true;P.deadT=0;P.atk=null;P.state='idle'}
+  if(P.hp<=0){P.dead=true;P.deadT=0;P.atk=null;P.state='idle';
+    if(MODE==='waves'&&!gameOver){
+      gameOver=true;
+      const ov=$('over');
+      if(ov){$('overWave').textContent=String(wave);ov.classList.add('on')}
+    }
+  }
 }
 function updateCombo(){
   const el=$('combo');
@@ -398,7 +459,7 @@ function enemyStrike(){
   const dx=P.x-E.x,dy=P.y-E.y,dist=Math.hypot(dx,dy);
   const ang=Math.atan2(dy,dx);
   if(dist<CONFIG.enemy.attackRange+P.r&&Math.abs(angDiff(ang,E.ang))<1.15&&P.inv<=0){
-    hurtPlayer(CONFIG.enemy.damage,ang);
+    hurtPlayer(E_DMG,ang);
   }
   for(let i=0;i<8;i++){
     const a=ang+rand(-.7,.7),sp=rand(80,240);
@@ -410,6 +471,7 @@ function enemyStrike(){
 function updatePlayer(dt){
   if(P.dead){
     P.deadT+=dt;
+    if(MODE==='waves')return;
     if(P.deadT>CONFIG.player.respawnDelay){
       P.dead=false;P.hp=P.max;P.x=-160;P.y=0;P.vx=P.vy=0;P.inv=1.2;P.state='idle';P.combo=0;updateCombo();
     }
@@ -465,7 +527,7 @@ function updateEnemy(dt){
   const ang=Math.atan2(dy,dx);
   if(E.stagger<=0){
     if(E.state==='chase'){
-      if(dist>CONFIG.enemy.contactRange){E.x+=dx/dist*CONFIG.enemy.speed*dt;E.y+=dy/dist*CONFIG.enemy.speed*dt;E.anim+=dt}
+      if(dist>CONFIG.enemy.contactRange){E.x+=dx/dist*E_SPEED*dt;E.y+=dy/dist*E_SPEED*dt;E.anim+=dt}
       else if(E.cd<=0){E.state='windup';E.t=0;E.ang=ang}
     } else if(E.state==='windup'){
       E.t+=dt;E.ang=lerp(E.ang,ang,.06);
@@ -513,7 +575,8 @@ function updateEnemy(dt){
 }
 function respawnEnemy(){
   const a=rand(0,TAU);
-  E.dead=false;E.hp=E.max;E.state='chase';E.t=0;E.cd=.9;E.stagger=0;E.vx=E.vy=0;E.deadT=0;
+  if(MODE==='waves')applyWaveStats(wave);
+  E.dead=false;E.hp=E.max;E.state='chase';E.t=0;E.cd=.9;E.stagger=0;E.vx=E.vy=0;E.deadT=0;E.poise=CONFIG.enemy.poise;
   E.x=clamp(P.x+Math.cos(a)*CONFIG.enemy.respawnDistance,-400,400);
   E.y=clamp(P.y+Math.sin(a)*CONFIG.enemy.respawnDistance,-400,400);
   for(let i=0;i<16;i++){
@@ -728,6 +791,16 @@ function syncHud(){
   $('pfill').style.width=(P.hp/P.max*100)+'%';
   $('efill').style.width=(E.dead?0:E.hp/E.max*100)+'%';
   $('php').textContent=Math.ceil(P.hp);
+  if(MODE==='waves'){
+    const el=$('wave');
+    if(el){
+      if(gameOver)el.classList.remove('on');
+      else{
+        if(waveToastT<=0)el.textContent='ONDA '+wave+' · '+waveKills+'/'+waveTarget(wave);
+        el.classList.add('on');
+      }
+    }
+  }
 }
 let camX=0,camY=0;
 function cameraZoom(){return clamp(Math.min(W,H)/550,.9,1.6)}
@@ -774,7 +847,7 @@ function frame(now){
   let dt=Math.min((now-last)/1000,.05);last=now;
   if(started){
     if(hitstop>0)hitstop-=dt;
-    else{time+=dt;updatePlayer(dt);updateEnemy(dt);updateParticles(dt)}
+    else{time+=dt;if(waveToastT>0)waveToastT-=dt;updatePlayer(dt);updateEnemy(dt);updateParticles(dt)}
   }
   render(dt);
   requestAnimationFrame(frame);
@@ -796,6 +869,26 @@ if(presetBtn){
   };
 }
 updateCombo();
+/* TASK-0010 — botões de modo e reinício */
+const modeBtn=$('modeBtn');
+if(modeBtn){
+  modeBtn.textContent='MODO: '+(MODE==='waves'?'ONDAS':'LOBBY');
+  modeBtn.onclick=()=>{
+    const u=new URL(location.href);
+    if(MODE==='waves')u.searchParams.delete('mode');else u.searchParams.set('mode','waves');
+    location.href=u.toString();
+  };
+}
+if(MODE==='waves'){
+  applyWaveStats(1);
+  if($('ename'))$('ename').textContent='INIMIGO · ONDA 1';
+  showWave('ONDA 1',CONFIG.waves.announce);
+  if($('toast'))$('toast').innerHTML='ONDA 1<br><small>sobreviva o quanto puder</small>';
+}
+const restartBtn=$('restart');
+if(restartBtn)restartBtn.onclick=()=>{
+  const u=new URL(location.href);u.searchParams.set('mode','waves');location.href=u.toString();
+};
 })();
 </script>
 </body>
