@@ -148,6 +148,8 @@ const BASE_CONFIG={
     dodge:{duration:.16,speed:760,invuln:.24,cooldown:.5}},
   enemy:{maxHp:260,speed:100,damage:9,attackRange:96,contactRange:72,
     windup:.55,strike:.14,recover:.55,cooldownMin:.4,cooldownMax:.9,
+    windupDrift:170,strikeLunge:260,armorKb:.25,guardBreak:.42,
+    poise:5,poiseRegen:1.5,armorPoiseMult:.5,
     respawnDelay:1.3,respawnDistance:300},
   combo:{window:2.4},
   attacks:{
@@ -199,7 +201,7 @@ const SPEED=CONFIG.player.speed;
 const P={x:-160,y:0,r:16,hp:CONFIG.player.maxHp,max:CONFIG.player.maxHp,facing:1,state:'idle',atk:null,dashT:0,dx:0,dy:0,
   inv:0,cd:0,combo:0,comboT:0,vx:0,vy:0,anim:0,dead:false,deadT:0,hitFlash:0};
 const E={x:180,y:0,r:22,hp:CONFIG.enemy.maxHp,max:CONFIG.enemy.maxHp,state:'chase',t:0,cd:.8,ang:0,stagger:0,vx:0,vy:0,
-  dead:false,deadT:0,kills:0,flash:0,anim:0};
+  dead:false,deadT:0,kills:0,flash:0,anim:0,poise:CONFIG.enemy.poise,hitDone:false};
 const ATK=CONFIG.attacks;
 let shake=0,hitstop=0,time=0,started=false,tick=0;
 const parts=[],floats=[],trail=[];
@@ -331,8 +333,31 @@ function tryHit(){
   const ang=Math.atan2(dy,dx);
   const dir={x:Math.cos(ang),y:Math.sin(ang)};
   E.hp=Math.max(0,E.hp-def.dmg);
-  E.stagger=Math.max(E.stagger,def.hs*2+.1);
-  E.vx+=dir.x*def.kb;E.vy+=dir.y*def.kb;
+  /* TASK-0009 — o problema central: o inimigo nunca contra-atacava.
+     Motivo: QUALQUER golpe leve dava stagger (.2s) e o stagger congelava a
+     máquina de estados inteira, inclusive a perseguição. Com combo a cada .26s,
+     ele ficava travado para sempre — o "manequim".
+     Agora existe postura (poise): golpes leves desgastam, e só ao zerar ele
+     perde o equilíbrio. Enquanto ele está preparando/golpeando, o desgaste é
+     reduzido (armadura), menos no golpe pesado, que sempre quebra a guarda. */
+  const attacking=(E.state==='windup'||E.state==='strike');
+  E.poise-=(def.heavy?3:1)*(attacking?CONFIG.enemy.armorPoiseMult:1);
+  if(def.heavy&&attacking){
+    E.state='recover';E.t=0;E.poise=CONFIG.enemy.poise;
+    E.stagger=Math.max(E.stagger,CONFIG.enemy.guardBreak);
+    E.vx+=dir.x*def.kb;E.vy+=dir.y*def.kb;
+    addFloat(E.x,E.y-E.r-34,'QUEBRA','#ffd166',18);
+  } else if(E.poise<=0){
+    E.poise=CONFIG.enemy.poise;
+    E.stagger=Math.max(E.stagger,.18);
+    if(attacking){E.state='recover';E.t=0}
+    E.vx+=dir.x*def.kb;E.vy+=dir.y*def.kb;
+  } else if(attacking){
+    E.vx+=dir.x*def.kb*CONFIG.enemy.armorKb;
+    E.vy+=dir.y*def.kb*CONFIG.enemy.armorKb;
+  } else {
+    E.vx+=dir.x*def.kb*.7;E.vy+=dir.y*def.kb*.7;
+  }
   E.flash=1;
   P.combo++;P.comboT=CONFIG.combo.window;updateCombo();
   hitstop=Math.max(hitstop,def.hs);
@@ -435,6 +460,7 @@ function updateEnemy(dt){
     return;
   }
   E.stagger=Math.max(0,E.stagger-dt);E.cd=Math.max(0,E.cd-dt);
+  E.poise=Math.min(CONFIG.enemy.poise,E.poise+CONFIG.enemy.poiseRegen*dt);
   const dx=P.x-E.x,dy=P.y-E.y,dist=Math.hypot(dx,dy)||1;
   const ang=Math.atan2(dy,dx);
   if(E.stagger<=0){
@@ -443,9 +469,21 @@ function updateEnemy(dt){
       else if(E.cd<=0){E.state='windup';E.t=0;E.ang=ang}
     } else if(E.state==='windup'){
       E.t+=dt;E.ang=lerp(E.ang,ang,.06);
-      if(E.t>=CONFIG.enemy.windup){E.state='strike';E.t=0;enemyStrike()}
+      /* TASK-0009: avança durante a preparação (era imóvel). Dá alcance real ao golpe
+         sem virar teleporte: 170 px/s durante .55s ≈ 93 px. */
+      if(dist>CONFIG.enemy.attackRange*.55){
+        E.x+=dx/dist*CONFIG.enemy.windupDrift*dt;
+        E.y+=dy/dist*CONFIG.enemy.windupDrift*dt;
+        E.anim+=dt;
+      }
+      if(E.t>=CONFIG.enemy.windup){E.state='strike';E.t=0;E.hitDone=false;enemyStrike()}
     } else if(E.state==='strike'){
       E.t+=dt;
+      /* TASK-0009: impulso à frente no golpe, desacelerado pelo mesmo damping do knockback. */
+      if(!E.hitDone){
+        E.vx+=Math.cos(E.ang)*CONFIG.enemy.strikeLunge;
+        E.vy+=Math.sin(E.ang)*CONFIG.enemy.strikeLunge;
+      }
       if(E.t>=CONFIG.enemy.strike){E.state='recover';E.t=0}
     } else if(E.state==='recover'){
       E.t+=dt;
@@ -454,6 +492,17 @@ function updateEnemy(dt){
   }
   E.x+=E.vx*dt;E.y+=E.vy*dt;
   const dmp=Math.exp(-8*dt);E.vx*=dmp;E.vy*=dmp;
+  /* TASK-0009: o inimigo não atravessa o jogador. Antes, o impulso do golpe podia
+     passar "por dentro" e terminar atrás dele — o jogador era empurrado para trás
+     e o combate perdia a leitura. Aqui ele para no anel de contato. */
+  {
+    const bx=P.x-E.x,by=P.y-E.y,bd=Math.hypot(bx,by),minB=P.r+E.r;
+    if(bd<minB&&bd>.001&&!P.dead){
+      const nx=bx/bd,ny=by/bd;
+      E.x=P.x-nx*minB;E.y=P.y-ny*minB;
+      E.vx*=.25;E.vy*=.25;
+    }
+  }
   const dd=Math.hypot(P.x-E.x,P.y-E.y),minD=P.r+E.r;
   if(dd<minD&&dd>.001&&!P.dead){
     const nx=(P.x-E.x)/dd,ny=(P.y-E.y)/dd,push=(minD-dd)/2;
@@ -616,20 +665,31 @@ function drawEnemy(){
   ctx.fillStyle='rgba(255,80,100,.6)';
   ctx.beginPath();ctx.arc(0,2+bob,6+Math.sin(time*6)*1.6,0,TAU);ctx.fill();
   ctx.restore();
-  // telegraph
+  // telegraph — TASK-0009: agora desenha o ALCANCE REAL do golpe
+  // (attackRange + P.r = 112 px) e o ÂNGULO REAL do teste de acerto (±1.15 rad).
+  // Antes mostrava 76 px e ±.62 rad: mentira de 36 px que fazia o jogador
+  // levar dano aparentemente fora da área vermelha.
   if(E.state==='windup'){
-    const p=clamp(E.t/.55,0,1);
+    const p=clamp(E.t/CONFIG.enemy.windup,0,1);
+    const reach=CONFIG.enemy.attackRange+P.r;
     ctx.save();ctx.translate(x,y);ctx.rotate(E.ang);
-    ctx.strokeStyle='rgba(255,70,90,'+(.22+.55*p)+')';ctx.lineWidth=3+7*p;ctx.lineCap='round';
-    ctx.beginPath();ctx.arc(0,0,76,-.62,.62);ctx.stroke();
-    ctx.strokeStyle='rgba(255,70,90,.5)';ctx.lineWidth=2;
+    // área preenchida: é exatamente onde o golpe acerta
+    ctx.fillStyle='rgba(255,60,80,'+(.04+.11*p)+')';
+    ctx.beginPath();ctx.moveTo(0,0);ctx.arc(0,0,reach,-1.15,1.15);ctx.closePath();ctx.fill();
+    ctx.strokeStyle='rgba(255,70,90,'+(.35+.55*p)+')';ctx.lineWidth=2+4*p;ctx.lineCap='round';
+    ctx.beginPath();ctx.arc(0,0,reach,-1.15,1.15);ctx.stroke();
+    // anel interno: progresso da preparação (usa o windup do preset, não .55 fixo)
+    ctx.strokeStyle='rgba(255,70,90,'+(.25+.35*p)+')';ctx.lineWidth=2;
     ctx.beginPath();ctx.arc(0,0,26+18*p,0,TAU);ctx.stroke();
     ctx.restore();
   }
   if(E.state==='strike'){
+    const reach=CONFIG.enemy.attackRange+P.r;
     ctx.save();ctx.translate(x,y);ctx.rotate(E.ang);
-    ctx.strokeStyle='rgba(255,120,130,.85)';ctx.lineWidth=6;ctx.lineCap='round';
-    ctx.beginPath();ctx.arc(0,0,78,-.9,.9);ctx.stroke();
+    ctx.fillStyle='rgba(255,120,130,.16)';
+    ctx.beginPath();ctx.moveTo(0,0);ctx.arc(0,0,reach,-1.15,1.15);ctx.closePath();ctx.fill();
+    ctx.strokeStyle='rgba(255,150,160,.95)';ctx.lineWidth=5;ctx.lineCap='round';
+    ctx.beginPath();ctx.arc(0,0,reach,-1.15,1.15);ctx.stroke();
     ctx.restore();
   }
 }
