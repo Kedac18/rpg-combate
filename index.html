@@ -216,10 +216,27 @@ function activePresetId(){
 const PRESET_ID=activePresetId();
 /* TASK-0010 — modos. lobby = sala de espera (comportamento original, padrão).
    waves = modo de jogo com ondas. ?mode=waves */
-const MODE=(()=>{
+/* TASK-0012 - CENAS. Hub: o jogador entra no lobby e navega para as areas.
+   Cada cena tem suas regras; trocar de cena e trocar o conjunto, nao somar. */
+const SCENES={
+  lobby:{label:'LOBBY',bounds:300,spawn:{x:0,y:210},enemies:'none',hud:false},
+  treino:{label:'TREINO',bounds:430,spawn:{x:-160,y:0},enemies:'dummy',hud:true},
+  dungeon:{label:'DUNGEON',bounds:430,spawn:{x:-160,y:0},enemies:'waves',hud:true}
+};
+const DOORS=[
+  {to:'treino',x:-150,y:-40,label:'TREINO'},
+  {to:'dungeon',x:150,y:-40,label:'DUNGEON'}
+];
+function sceneFromUrl(){
   const qs=(typeof location!=='undefined'&&location.search)||'';
-  return new URLSearchParams(qs).get('mode')==='waves'?'waves':'lobby';
-})();
+  const p=new URLSearchParams(qs);
+  const sc=p.get('scene');
+  if(sc&&SCENES[sc])return sc;
+  if(p.get('mode')==='waves')return 'dungeon';  /* compatibilidade com link antigo */
+  return 'lobby';
+}
+let scene=sceneFromUrl();
+function sceneCfg(){return SCENES[scene]}
 const ACTIVE_PRESET=PRESETS[PRESET_ID];
 const CONFIG=buildConfig(BASE_CONFIG,ACTIVE_PRESET.overrides);
 /* Vista somente-leitura para inspeção (TASK-0003).
@@ -254,7 +271,7 @@ function nearestEnemy(){
 let E=null;
 function refreshTarget(){E=nearestEnemy()}
 /* TASK-0010 — estado do modo ondas */
-let wave=MODE==='waves'?1:0,waveKills=0,waveTotal=0,gameOver=false,waveToastT=0;
+let wave=scene==='dungeon'?1:0,waveKills=0,waveTotal=0,gameOver=false,waveToastT=0;
 let waveSpawnLeft=0,spawnCd=0;
 let E_SPEED=CONFIG.enemy.speed,E_DMG=CONFIG.enemy.damage;
 function waveTarget(w){return CONFIG.waves.perWaveBase+CONFIG.waves.perWaveGrow*(w-1)}
@@ -467,7 +484,7 @@ function killEnemy(en){
       size:rand(2,5),col:i%2?'255,90,110':'255,210,150',line:i%2===0});
   }
   addFloat(en.x,en.y-40,'ABATIDO','#ffd166',20);
-  if(MODE==='waves'){
+  if(scene==='dungeon'){
     waveKills++;
     if(waveSpawnLeft<=0&&aliveCount()===0)nextWave();
   }
@@ -483,7 +500,7 @@ function hurtPlayer(dmg,ang){
   const f=$('flash');f.style.opacity=.9;setTimeout(()=>f.style.opacity=0,90);
   sfxHit(false);
   if(P.hp<=0){P.dead=true;P.deadT=0;P.atk=null;P.state='idle';
-    if(MODE==='waves'&&!gameOver){
+    if(scene==='dungeon'&&!gameOver){
       gameOver=true;
       const ov=$('over');
       if(ov){$('overWave').textContent=String(wave);ov.classList.add('on')}
@@ -511,7 +528,7 @@ function enemyStrike(en){
 function updatePlayer(dt){
   if(P.dead){
     P.deadT+=dt;
-    if(MODE==='waves')return;
+    if(scene==='dungeon')return;
     if(P.deadT>CONFIG.player.respawnDelay){
       P.dead=false;P.hp=P.max;P.x=-160;P.y=0;P.vx=P.vy=0;P.inv=1.2;P.state='idle';P.combo=0;updateCombo();
     }
@@ -550,8 +567,14 @@ function updatePlayer(dt){
   }
   P.x+=P.vx*dt;P.y+=P.vy*dt;
   const dmp=Math.exp(-9*dt);P.vx*=dmp;P.vy*=dmp;
+  if(scene==='lobby'&&!P.dead){
+    for(const dr of DOORS){
+      if(Math.hypot(P.x-dr.x,P.y-dr.y)<40){goScene(dr.to);break}
+    }
+  }
+  const bd=sceneCfg().bounds;
   const d=Math.hypot(P.x,P.y);
-  if(d>430){P.x*=430/d;P.y*=430/d}
+  if(d>bd){P.x*=bd/d;P.y*=bd/d}
 }
 
 function aliveCount(){let n=0;for(const en of enemies)if(!en.dead)n++;return n}
@@ -596,19 +619,20 @@ function updateOneEnemy(dt,en){
     en.x=P.x-nx*minB;en.y=P.y-ny*minB;
     en.vx*=.25;en.vy*=.25;
   }
-  const d=Math.hypot(en.x,en.y);
-  if(d>430){en.x*=430/d;en.y*=430/d}
+  const bdE=sceneCfg().bounds;
+  const dE=Math.hypot(en.x,en.y);
+  if(dE>bdE){en.x*=bdE/dE;en.y*=bdE/dE}
 }
 function updateEnemy(dt){
   for(const en of enemies)updateOneEnemy(dt,en);
   // limpa corpos antigos
   for(let i=enemies.length-1;i>=0;i--){
     const en=enemies[i];
-    if(en.dead&&(MODE==='waves'?en.deadT>1.6:en.deadT>CONFIG.enemy.respawnDelay))enemies.splice(i,1);
+    if(en.dead&&(scene==='dungeon'?en.deadT>1.6:en.deadT>CONFIG.enemy.respawnDelay))enemies.splice(i,1);
   }
-  if(MODE==='waves'){
+  if(scene==='dungeon'){
     if(!gameOver)spawnTick(dt);
-  } else if(enemies.length===0){
+  } else if(scene==='treino'&&enemies.length===0){
     spawnLobbyEnemy(true);
   }
   refreshTarget();
@@ -631,6 +655,42 @@ function nextWave(){
   showWave('ONDA '+wave,CONFIG.waves.announce);
 }
 function respawnEnemy(){spawnLobbyEnemy()}
+function applySceneHud(){
+  const cfg=sceneCfg();
+  const top=document.querySelector&&document.querySelector('.top');
+  if(top)top.style.display=cfg.hud?'':'none';
+  const eb=$('ename');
+  if(eb)eb.textContent=scene==='dungeon'?('INIMIGO · ONDA '+wave):scene==='treino'?'MANEQUIM DE TESTE':'HUB';
+  const mb=$('modeBtn');
+  if(mb)mb.textContent='CENA: '+cfg.label;
+  if(scene!=='dungeon'){const w=$('wave');if(w)w.classList.remove('on')}
+}
+function goScene(id){
+  if(!SCENES[id]||id===scene)return;
+  scene=id;
+  enemies.length=0;
+  waveKills=0;gameOver=false;waveToastT=0;spawnCd=0;
+  const ov=$('over');if(ov)ov.classList.remove('on');
+  if(scene==='dungeon'){
+    wave=1;waveSpawnLeft=waveTarget(1);
+    P.max=CONFIG.player.maxHp;P.hp=P.max;P.dmgMul=1;
+    showWave('ONDA 1',CONFIG.waves.announce);
+  } else {
+    wave=0;waveSpawnLeft=0;
+    P.dmgMul=1;P.max=CONFIG.player.maxHp;P.hp=P.max;
+    if(scene==='treino')spawnLobbyEnemy();
+  }
+  const sp=sceneCfg().spawn;
+  P.x=sp.x;P.y=sp.y;P.vx=0;P.vy=0;P.inv=1.2;P.state='idle';P.atk=null;P.combo=0;P.comboT=0;
+  refreshTarget();
+  applySceneHud();
+  if(typeof history!=='undefined'&&history.replaceState){
+    try{
+      const u=new URL(location.href);u.searchParams.set('scene',id);
+      history.replaceState(null,'',u.toString());
+    }catch(e){}
+  }
+}
 function updateParticles(dt){
   for(let i=parts.length-1;i>=0;i--){
     const p=parts[i];p.life-=dt;
@@ -663,7 +723,7 @@ function swordTip(){
   return{x:hand.x+Math.cos(ang)*len,y:hand.y+Math.sin(ang)*len*.9,ang,len,hand};
 }
 function drawArena(){
-  const R=430;
+  const R=sceneCfg().bounds;
   const g=ctx.createRadialGradient(0,0,40,0,0,R+120);
   g.addColorStop(0,'#121a2b');g.addColorStop(.55,'#0b1018');g.addColorStop(1,'#05070b');
   ctx.fillStyle=g;ctx.beginPath();ctx.arc(0,0,R+200,0,TAU);ctx.fill();
@@ -684,6 +744,23 @@ function drawArena(){
   ctx.beginPath();ctx.arc(0,0,R,0,TAU);
   ctx.strokeStyle='rgba(110,190,255,.35)';ctx.lineWidth=2;
   ctx.shadowColor='rgba(90,180,255,.55)';ctx.shadowBlur=26;ctx.stroke();ctx.shadowBlur=0;
+  /* TASK-0012 - portas do hub */
+  if(scene==='lobby'){
+    for(const d of DOORS){
+      const pulse=.5+.5*Math.sin(time*2.4);
+      ctx.save();ctx.translate(d.x,d.y);
+      const g2=ctx.createRadialGradient(0,0,4,0,0,58);
+      g2.addColorStop(0,'rgba(120,220,255,'+(.30+.18*pulse)+')');
+      g2.addColorStop(1,'rgba(60,140,220,0)');
+      ctx.fillStyle=g2;ctx.beginPath();ctx.arc(0,0,58,0,TAU);ctx.fill();
+      ctx.strokeStyle='rgba(150,225,255,'+(.55+.35*pulse)+')';ctx.lineWidth=2.5;
+      ctx.beginPath();ctx.arc(0,0,34,0,TAU);ctx.stroke();
+      ctx.fillStyle='rgba(190,235,255,.92)';
+      ctx.font='700 13px ui-sans-serif,system-ui,sans-serif';ctx.textAlign='center';
+      ctx.fillText(d.label,0,4);
+      ctx.restore();
+    }
+  }
 }
 
 function drawPlayer(){
@@ -834,7 +911,7 @@ function syncHud(){
   $('pfill').style.width=(P.hp/P.max*100)+'%';
   $('efill').style.width=(E&&!E.dead?E.hp/E.max*100:0)+'%';
   $('php').textContent=Math.ceil(P.hp);
-  if(MODE==='waves'){
+  if(scene==='dungeon'){
     const el=$('wave');
     if(el){
       if(gameOver)el.classList.remove('on');
@@ -920,24 +997,22 @@ updateCombo();
 /* TASK-0010 — botões de modo e reinício */
 const modeBtn=$('modeBtn');
 if(modeBtn){
-  modeBtn.textContent='MODO: '+(MODE==='waves'?'ONDAS':'LOBBY');
   modeBtn.onclick=()=>{
-    const u=new URL(location.href);
-    if(MODE==='waves')u.searchParams.delete('mode');else u.searchParams.set('mode','waves');
-    location.href=u.toString();
+    const ordem=['lobby','treino','dungeon'];
+    goScene(ordem[(ordem.indexOf(scene)+1)%ordem.length]);
   };
 }
-if(MODE==='lobby'){
-  spawnLobbyEnemy();
-  refreshTarget();
-}
-if(MODE==='waves'){
+if(scene==='treino')spawnLobbyEnemy();
+if(scene==='dungeon'){
   waveSpawnLeft=waveTarget(1);spawnCd=0;
-  refreshTarget();
-  if($('ename'))$('ename').textContent='INIMIGO · ONDA 1';
   showWave('ONDA 1',CONFIG.waves.announce);
-  if($('toast'))$('toast').innerHTML='ONDA 1<br><small>sobreviva o quanto puder</small>';
 }
+const sp0=sceneCfg().spawn;
+P.x=sp0.x;P.y=sp0.y;
+refreshTarget();
+applySceneHud();
+if(scene==='dungeon'&&$('toast'))$('toast').innerHTML='ONDA 1<br><small>sobreviva o quanto puder</small>';
+if(scene==='lobby'&&$('toast'))$('toast').innerHTML='HUB<br><small>ande até uma porta</small>';
 const restartBtn=$('restart');
 if(restartBtn)restartBtn.onclick=()=>{
   const u=new URL(location.href);u.searchParams.set('mode','waves');location.href=u.toString();
